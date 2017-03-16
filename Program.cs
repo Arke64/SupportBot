@@ -3,16 +3,18 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.Sockets;
 
 namespace SupportBot {
     public class Program {
         private readonly IReadOnlyDictionary<string, Action<IrcChannel, string>> handlers;
         private readonly Random random;
-        private readonly List<string> channels;
+        private readonly HashSet<string> channels;
         private readonly IDictionary<string, string[]> tellLines;
         private IrcUser user;
         private IrcClient client;
         private string nick;
+        private string pass;
         private string server;
         private bool started;
 
@@ -24,18 +26,32 @@ namespace SupportBot {
                 ["tell"] = this.OnTellReceived
             };
             this.random = new Random((int)DateTime.UtcNow.Ticks);
-            this.channels = new List<string>();
+            this.channels = new HashSet<string>();
             this.tellLines = new Dictionary<string, string[]>();
         }
 
         private void Start() {
             this.user = new IrcUser(this.nick, this.nick);
             this.client = new IrcClient(this.server, this.user);
-            this.client.ConnectionComplete += (s, e) => this.channels.ForEach(c => this.client.JoinChannel(c));
             this.client.ChannelMessageRecieved += this.OnMessageReceived;
             this.client.Error += (s, e) => this.OnError(e.Error.ToString());
-            this.client.NetworkError += (s, e) => this.OnError(e.SocketError.ToString());
+            this.client.NetworkError += (s, e) => { if (e.SocketError != SocketError.NotConnected) this.OnError(e.SocketError.ToString()); };
+
+            this.client.ConnectionComplete += (s, e) => {
+                if (!string.IsNullOrEmpty(this.pass))
+                    this.client.SendMessage("IDENTIFY " + this.pass, "NICKSERV");
+
+                foreach (var c in this.channels)
+                    this.client.JoinChannel(c);
+            };
+
+            this.client.UserJoinedChannel += (s, e) => {
+                if (e.User.Equals(this.user))
+                    this.channels.Add(e.Channel.Name);
+            };
+
             this.client.ConnectAsync();
+
             this.started = true;
         }
 
@@ -95,11 +111,13 @@ namespace SupportBot {
 
                 lock (this) {
                     switch (parts[0].ToLowerInvariant()) {
-                        case "nick" when parts.Length == 2:
+                        case "nick" when !this.started && parts.Length == 2:
                             this.nick = parts[1];
 
-                            if (this.started)
-                                this.client.Nick(this.nick);
+                            break;
+
+                        case "pass" when !this.started && parts.Length == 2:
+                            this.pass = parts[1];
 
                             break;
 
@@ -127,7 +145,7 @@ namespace SupportBot {
 
                             break;
 
-                        case "speak" when this.started && parts.Length == 2:
+                        case "say" when this.started && parts.Length == 2:
                             if (this.user.Channels.Contains(parts[1])) {
                                 Console.Write("Message: ");
 
@@ -145,12 +163,16 @@ namespace SupportBot {
                             break;
 
                         case "start" when !this.started:
-                            if (this.nick != null && this.server != null) {
-                                this.Start();
-                            }
-                            else {
-                                Console.WriteLine("Info not set.");
-                            }
+                            if (this.nick == null) Console.WriteLine("nick not set.");
+                            else if (this.server == null) Console.WriteLine("server not set.");
+                            else this.Start();
+
+                            break;
+
+                        case "stop" when this.started:
+                            this.client.Quit("Shutting down.");
+                            this.client = null;
+                            this.started = false;
 
                             break;
 
@@ -162,13 +184,15 @@ namespace SupportBot {
 
                         case "help":
                             Console.WriteLine("nick [nick]: Sets or changes the nick to [nick].");
+                            Console.WriteLine("pass [pass]: Sets the [pass] to identify with nickserv.");
                             Console.WriteLine("server [server]: Sets or changes the server to [server].");
                             Console.WriteLine("join [channel]: Joins [channel].");
                             Console.WriteLine("set-lines [filename]: Add the lines in [file] to the tell command. Do not provide the extension; the file must exist in the same directory as this program.");
-                            Console.WriteLine("speak [channel]: Say in [channel] the message specified after this command.");
+                            Console.WriteLine("say [channel]: Say in [channel] the message specified after this command.");
                             Console.WriteLine("channels: Lists all channels in.");
                             Console.WriteLine("start: Connects to the server.");
-                            Console.WriteLine("exit: Stops the program.");
+                            Console.WriteLine("stop: Disconnects from the server.");
+                            Console.WriteLine("exit: Exits the program.");
 
                             break;
 
